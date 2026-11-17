@@ -30,8 +30,8 @@
       <Private>false</Private>
     </Reference>
 
-    <Reference Include="ImGui.NET">
-      <HintPath>$(ExileApiDir)ImGui.NET.dll</HintPath>
+    <Reference Include="Hexa.NET.ImGui">
+      <HintPath>$(ExileApiDir)Hexa.NET.ImGui.dll</HintPath>
       <Private>false</Private>
     </Reference>
 
@@ -54,6 +54,10 @@
       <HintPath>$(ExileApiDir)Newtonsoft.Json.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Hexa.NET.ImGui" />
   </ItemGroup>
 
 </Project>

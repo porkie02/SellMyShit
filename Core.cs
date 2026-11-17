@@ -11,7 +11,6 @@ using ExileCore.PoEMemory.Elements.Village;
 using ExileCore.PoEMemory.Models;
 using ExileCore.Shared;
 using ExileCore.Shared.Helpers;
-using ImGuiNET;
 using Microsoft.VisualBasic.Devices;
 using Newtonsoft.Json;
 using SharpDX;
@@ -44,9 +43,6 @@ namespace SellMyShit
 
         private static readonly TimeSpan CurrencyItemsRefreshInterval =
             TimeSpan.FromMilliseconds(500);
-
-        private readonly Dictionary<string, double> _ninjaUnitValueCache =
-            new(StringComparer.OrdinalIgnoreCase);
 
         private List<CurrencyExchangeCurrencyPickerCurrencyOption>
             _currencyExchangeItemsCache = [];
@@ -438,8 +434,7 @@ namespace SellMyShit
 
             ApplyImGuiTableSorting();
 
-            var clipper = new ImGuiListClipperPtr(
-                ImGuiNative.ImGuiListClipper_ImGuiListClipper());
+            var clipper = ImGui.ImGuiListClipper();
 
             try
             {
@@ -470,7 +465,7 @@ namespace SellMyShit
             var sortSpecs =
                 ImGui.TableGetSortSpecs();
 
-            if (sortSpecs.NativePtr == null ||
+            if (sortSpecs.IsNull ||
                 !sortSpecs.SpecsDirty ||
                 sortSpecs.SpecsCount <= 0)
             {
@@ -2071,16 +2066,7 @@ namespace SellMyShit
             chaosValue = 0;
 
             var itemType =
-                option?.ItemType;
-
-            if (itemType == null)
-            {
-                // LogError(
-                //     $"No BaseItemType found for " +
-                //     $"{GetItemName(option)}.");
-
-                return false;
-            }
+                ResolveBaseItemType(option);
 
             _getNinjaBaseItemTypeValue ??=
                 GameController.PluginBridge
@@ -2089,9 +2075,29 @@ namespace SellMyShit
 
             if (_getNinjaBaseItemTypeValue == null)
             {
-                LogError(
-                    "NinjaPrice.GetBaseItemTypeValue " +
-                    "is unavailable.");
+                if (!_ninjaBridgeWarningLogged)
+                {
+                    _ninjaBridgeWarningLogged = true;
+                    LogError(
+                        "NinjaPrice.GetBaseItemTypeValue is unavailable; " +
+                        "currency values will show as 0.");
+                }
+
+                return false;
+            }
+
+            if (itemType == null)
+            {
+                // one line per name, so a currency the game files cannot resolve stays visible
+                // instead of turning into a silent 0
+                var name = GetItemName(option);
+
+                if (_unresolvedCurrencyNames.Add(name))
+                {
+                    LogError(
+                        $"No BaseItemType found for currency '{name}'; " +
+                        "its value will show as 0.");
+                }
 
                 return false;
             }
@@ -2111,6 +2117,63 @@ namespace SellMyShit
 
                 return false;
             }
+        }
+
+        private readonly HashSet<string> _unresolvedCurrencyNames =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        private bool _ninjaBridgeWarningLogged;
+
+        private Dictionary<string, BaseItemType> _baseItemTypesByName;
+        private int _baseItemTypesSourceCount = -1;
+
+        // This ExileCore hands the currency picker options over without a BaseItemType, so look the
+        // type up by the name the picker shows. The map is built once (a few thousand entries) and
+        // rebuilt if the game files reload with a different size.
+        private BaseItemType ResolveBaseItemType(
+            CurrencyExchangeCurrencyPickerCurrencyOption option)
+        {
+            var itemType = option?.ItemType;
+
+            if (!string.IsNullOrEmpty(itemType?.BaseName))
+                return itemType;
+
+            var types =
+                GameController?
+                    .Files?
+                    .BaseItemTypes?
+                    .Contents;
+
+            if (types == null || types.Count == 0)
+                return itemType;
+
+            if (_baseItemTypesByName == null ||
+                _baseItemTypesSourceCount != types.Count)
+            {
+                var byName =
+                    new Dictionary<string, BaseItemType>(
+                        StringComparer.OrdinalIgnoreCase);
+
+                foreach (var candidate in types.Values)
+                {
+                    if (string.IsNullOrEmpty(candidate?.BaseName))
+                        continue;
+
+                    // a name can exist in more than one class; the picker lists currencies, so
+                    // never let a non-currency entry replace one
+                    if (!byName.TryGetValue(candidate.BaseName, out var existing) ||
+                        existing.ClassName != "StackableCurrency")
+                    {
+                        byName[candidate.BaseName] = candidate;
+                    }
+                }
+
+                _baseItemTypesByName = byName;
+                _baseItemTypesSourceCount = types.Count;
+            }
+
+            return _baseItemTypesByName.GetValueOrDefault(GetItemName(option))
+                   ?? itemType;
         }
 
         private double GetTotalNinjaValue(
@@ -2243,7 +2306,7 @@ namespace SellMyShit
                     ImGui.TextWrapped(message);
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
             }
         }
