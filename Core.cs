@@ -11,6 +11,7 @@ using ExileCore.PoEMemory.Elements.Village;
 using ExileCore.PoEMemory.Models;
 using ExileCore.Shared;
 using ExileCore.Shared.Helpers;
+using ExileCore.Shared.Nodes;
 using Microsoft.VisualBasic.Devices;
 using Newtonsoft.Json;
 using SharpDX;
@@ -65,7 +66,20 @@ namespace SellMyShit
         private List<string> debugMessages = new List<string>();
 
 
-        public override bool Initialise() => true;
+        public override bool Initialise()
+        {
+            // these two came later than the settings file, so an older save can still hold nulls
+            if (Settings != null)
+            {
+                Settings.AttachToExchangeWindow ??= new ToggleNode(true);
+                Settings.AttachDirection ??= new TextNode("Left");
+
+                if (Array.IndexOf(AttachDirections, Settings.AttachDirection.Value) < 0)
+                    Settings.AttachDirection.Value = "Left";
+            }
+
+            return true;
+        }
 
         public override void Render()
         {
@@ -289,6 +303,12 @@ namespace SellMyShit
             if (DateTime.UtcNow < _hideOverlayUntilUtc)
                 return;
 
+            if (Settings.AttachToExchangeWindow.Value &&
+                TryGetExchangePanelRect(out var panelRect))
+            {
+                PrepareAttach(panelRect, ImGui.GetIO().DisplaySize);
+            }
+
             if (!ImGui.Begin(
                     "Owned Currency Items",
                     ImGuiWindowFlags.AlwaysAutoResize))
@@ -297,7 +317,62 @@ namespace SellMyShit
                 return;
             }
 
+            _lastWindowSize = ImGui.GetWindowSize();
+
+            if (Settings.AttachToExchangeWindow.Value &&
+                TryGetExchangePanelRect(out panelRect))
+            {
+                ApplyAttachPosition(panelRect, _lastWindowSize);
+            }
+
+            // width of the list itself, not the window: reading the window's content width here
+            // makes an auto-resizing window keep whatever width it happened to have last frame
+            var available = Settings.AttachToExchangeWindow.Value
+                ? _attachedChildWidth
+                : Settings.WindowWidth.Value;
+            var attached = Settings.AttachToExchangeWindow.Value;
+            var style = ImGui.GetStyle();
+
+            var buttonsWidth =
+                ImGui.CalcTextSize(attached ? "Detach" : "Attach").X +
+                style.FramePadding.X * 2 +
+                (attached
+                    ? ImGui.CalcTextSize($"Dir: {Settings.AttachDirection.Value}").X +
+                      style.FramePadding.X * 2 + style.ItemSpacing.X
+                    : 0f);
+
+            // when the window is squeezed the buttons drop to their own row instead of clipping
+            var narrow = available - buttonsWidth < 120f;
+
+            ImGui.SetNextItemWidth(
+                narrow
+                    ? available
+                    : Math.Max(120f, available - buttonsWidth - style.ItemSpacing.X));
+
             DrawFilterControls();
+
+            if (!narrow)
+                ImGui.SameLine();
+
+            if (ImGui.SmallButton(attached ? "Detach" : "Attach"))
+            {
+                Settings.AttachToExchangeWindow.Value = !attached;
+            }
+
+            if (attached)
+            {
+                ImGui.SameLine();
+
+                if (ImGui.SmallButton($"Dir: {Settings.AttachDirection.Value}"))
+                {
+                    var index = Array.IndexOf(
+                        AttachDirections,
+                        Settings.AttachDirection.Value);
+
+                    Settings.AttachDirection.Value =
+                        AttachDirections[(index + 1) % AttachDirections.Length];
+                }
+            }
 
             var filteredItems =
                 GetDisplayItems(ownedItems);
@@ -308,8 +383,12 @@ namespace SellMyShit
             ImGui.Separator();
 
             var childSize = new NumVector2(
-                Settings.WindowWidth.Value,
-                Settings.WindowHeight.Value);
+                Settings.AttachToExchangeWindow.Value
+                    ? _attachedChildWidth
+                    : Settings.WindowWidth.Value,
+                Settings.AttachToExchangeWindow.Value
+                    ? _attachedChildHeight
+                    : Settings.WindowHeight.Value);
 
             if (ImGui.BeginChild(
                     "CurrencyOwnedItemsChild",
@@ -324,10 +403,84 @@ namespace SellMyShit
             ImGui.End();
         }
 
+        private static readonly string[] AttachDirections =
+            ["Right", "Bottom", "Left", "Top"];
+
+        private NumVector2 _lastWindowSize;
+        private int _attachedChildWidth = 400;
+        private int _attachedChildHeight = 300;
+
+        private bool TryGetExchangePanelRect(out RectangleF rect)
+        {
+            rect = GetCurrencyExchangePanel()?.GetClientRect() ?? default;
+            return rect.Width > 0 && rect.Height > 0;
+        }
+
+        // Shrinks the window to the free strip beside the panel, so it can never sit on top of the
+        // panel itself: the child gets the smaller content size and the window is capped to the strip.
+        private void PrepareAttach(RectangleF panelRect, NumVector2 display)
+        {
+            const float gap = 10f;
+            const float chromeWidth = 24f;   // window padding
+            const float chromeHeight = 96f;  // title bar, filter row, count line, separator, padding
+
+            var direction = Settings.AttachDirection.Value;
+
+            var (sideWidth, sideHeight) = direction switch
+            {
+                "Left" => (panelRect.Left - gap, display.Y),
+                "Bottom" => (display.X - panelRect.Left, display.Y - panelRect.Bottom - gap),
+                "Top" => (display.X - panelRect.Left, panelRect.Top - gap),
+                _ => (display.X - panelRect.Right - gap, display.Y - panelRect.Top),
+            };
+
+            var maxWidth = Math.Max(sideWidth, 160f);
+            var maxHeight = Math.Max(sideHeight, 140f);
+
+            _attachedChildWidth = Math.Clamp(
+                Settings.WindowWidth.Value,
+                100,
+                (int)Math.Max(maxWidth - chromeWidth, 100f));
+
+            _attachedChildHeight = Math.Clamp(
+                Settings.WindowHeight.Value,
+                80,
+                (int)Math.Max(maxHeight - chromeHeight, 80f));
+
+            ImGui.SetNextWindowSizeConstraints(
+                new NumVector2(140, 120),
+                new NumVector2(maxWidth, maxHeight));
+        }
+
+        private void ApplyAttachPosition(RectangleF panelRect, NumVector2 size)
+        {
+            const float gap = 10f;
+
+            var x = Settings.AttachDirection.Value switch
+            {
+                "Left" => panelRect.Left - size.X - gap,
+                "Bottom" => panelRect.Left,
+                "Top" => panelRect.Left,
+                _ => panelRect.Right + gap,
+            };
+
+            var y = Settings.AttachDirection.Value switch
+            {
+                "Left" => panelRect.Top,
+                "Bottom" => panelRect.Bottom + gap,
+                "Top" => panelRect.Top - size.Y - gap,
+                _ => panelRect.Top,
+            };
+
+            ImGui.SetWindowPos(
+                new NumVector2(Math.Max(x, 0f), Math.Max(y, 0f)),
+                ImGuiCond.Always);
+        }
+
         private void DrawFilterControls()
         {
             ImGui.InputText(
-                "Filter",
+                "##Filter",
                 ref _filterText,
                 256);
         }
@@ -378,14 +531,14 @@ namespace SellMyShit
         }
 
         private unsafe void DrawOwnedItemsTable(
-    IReadOnlyList<CurrencyExchangeCurrencyPickerCurrencyOption> items)
+            IReadOnlyList<CurrencyExchangeCurrencyPickerCurrencyOption> items)
         {
             const ImGuiTableFlags tableFlags =
                 ImGuiTableFlags.Borders |
                 ImGuiTableFlags.RowBg |
                 ImGuiTableFlags.Resizable |
                 ImGuiTableFlags.Sortable |
-                ImGuiTableFlags.SizingFixedFit |
+                ImGuiTableFlags.SizingStretchProp |
                 ImGuiTableFlags.NoSavedSettings;
 
             if (!ImGui.BeginTable(
@@ -400,34 +553,35 @@ namespace SellMyShit
             var defaultSortByColum = Settings.SortBy.Value;
 
 
-            var nameTableFlags = ImGuiTableColumnFlags.WidthFixed |
-                ImGuiTableColumnFlags.PreferSortDescending;
+            var nameTableFlags = ImGuiTableColumnFlags.WidthStretch |
+                ImGuiTableColumnFlags.PreferSortAscending;
             if (defaultSortByColum == "Name") nameTableFlags |= ImGuiTableColumnFlags.DefaultSort;
             ImGui.TableSetupColumn(
                 "Name",
-                ImGuiTableColumnFlags.WidthStretch |
-                ImGuiTableColumnFlags.PreferSortAscending);
+                nameTableFlags,
+                3f);
 
-            var valueTableFlags = ImGuiTableColumnFlags.WidthFixed |
+            var valueTableFlags = ImGuiTableColumnFlags.WidthStretch |
                 ImGuiTableColumnFlags.PreferSortDescending;
             if (defaultSortByColum == "Value") valueTableFlags |= ImGuiTableColumnFlags.DefaultSort;
             ImGui.TableSetupColumn(
                 "Value",
-                ImGuiTableColumnFlags.WidthFixed |
-                ImGuiTableColumnFlags.DefaultSort |
-                ImGuiTableColumnFlags.PreferSortDescending);
+                valueTableFlags,
+                2f);
 
-            var ownedTableFlags = ImGuiTableColumnFlags.WidthFixed |
+            var ownedTableFlags = ImGuiTableColumnFlags.WidthStretch |
                 ImGuiTableColumnFlags.PreferSortDescending;
             if (defaultSortByColum == "Owned") ownedTableFlags |= ImGuiTableColumnFlags.DefaultSort;
             ImGui.TableSetupColumn(
-                "Owned", ownedTableFlags
-);
+                "Owned",
+                ownedTableFlags,
+                1.4f);
 
             ImGui.TableSetupColumn(
                 "Action",
                 ImGuiTableColumnFlags.WidthFixed |
-                ImGuiTableColumnFlags.NoSort);
+                ImGuiTableColumnFlags.NoSort,
+                58f);
 
             // ImGui erzeugt die klickbaren Header und Sortierpfeile.
             ImGui.TableHeadersRow();
@@ -527,7 +681,7 @@ namespace SellMyShit
 
             ImGui.TableNextColumn();
 
-            if (ImGui.Button($"Sell##{index}"))
+            if (ImGui.SmallButton($"Sell##{index}"))
                 StartSellSequence(item);
         }
 
@@ -1274,6 +1428,24 @@ namespace SellMyShit
                             break;
                         }
 
+                        var apiRatio = GetMarketRatiosFromSearchResults()
+                            .FirstOrDefault();
+
+                        if (apiRatio != null)
+                        {
+                            _pendingMarketRatio = apiRatio;
+
+                            AddDebugMessage(
+                                $"Market search API ratio for " +
+                                $"{ownedAmount} of {itemName}: " +
+                                $"{apiRatio.MarketGetRate}:{apiRatio.MarketGiveRate}");
+
+                            SetSellSequenceStep(
+                                SellSequenceStep.ClickOfferedItemInput);
+
+                            break;
+                        }
+
                         AddDebugMessage(
                             $"Showing market ratio tooltip for " +
                             $"{ownedAmount} of {itemName}...");
@@ -1783,6 +1955,10 @@ namespace SellMyShit
         {
             _sellSequenceStep = SellSequenceStep.Idle;
 
+            // the picker only fills its owned counts when it opens, so drop the cached list and
+            // let the next frame read the current one
+            _currencyExchangeItemsCacheInitialized = false;
+
             _pendingSellItem = null;
             _pendingWantedItem = null;
 
@@ -2198,7 +2374,19 @@ namespace SellMyShit
 
             if (Settings.ListPriceBasedOnHighestCompetingTrade)
             {
-                AddDebugMessage($"ListPriceBasedOnHighestCompetingTrade is enabled. Attempting to retrieve all available market ratios...");
+                var apiRatios = GetMarketRatiosFromSearchResults();
+
+                if (apiRatios.Count > 0)
+                {
+                    AddDebugMessage(
+                        $"Market search API returned {apiRatios.Count} competing ratios.");
+
+                    return apiRatios.First();
+                }
+
+                AddDebugMessage(
+                    "Market search API returned no listings, falling back to the ratio tooltip.");
+
                 var marketRatioPanelChildIndex = Settings.MarketRatioPanelIndex.Value;
                 var marketRatioPanel = currencyExchangePanel.GetChildAtIndex(marketRatioPanelChildIndex);
                 var marketRatioPanelTooltip = marketRatioPanel?.Tooltip;
@@ -2273,6 +2461,78 @@ namespace SellMyShit
                     AvailableTrades = 0 // Not available in this mode
                 };
             }
+        }
+
+        private List<MarketRatio> GetMarketRatiosFromSearchResults()
+        {
+            var ratios = new List<MarketRatio>();
+
+            var results =
+                GameController?
+                    .IngameState?
+                    .IngameUi?
+                    .MarketSearchResultsPanel?
+                    .Results;
+
+            if (results == null || results.Count == 0)
+                return ratios;
+
+            var offeredName = _pendingSellItemName?.Trim();
+
+            foreach (var result in results)
+            {
+                if (result == null)
+                    continue;
+
+                var price = result.PriceAmount;
+
+                if (price <= 0)
+                    continue;
+
+                var currency = result.PriceCurrencyString?.Trim();
+
+                float getRate;
+                float giveRate;
+
+                if (string.Equals(currency, WantedCurrencyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    getRate = price;
+                    giveRate = 1;
+                }
+                else if (!string.IsNullOrEmpty(offeredName) &&
+                         string.Equals(currency, offeredName, StringComparison.OrdinalIgnoreCase))
+                {
+                    getRate = 1;
+                    giveRate = price;
+                }
+                else
+                {
+                    continue;
+                }
+
+                var existing = ratios.FirstOrDefault(ratio =>
+                    ratio.MarketGetRate == getRate &&
+                    ratio.MarketGiveRate == giveRate);
+
+                if (existing != null)
+                {
+                    existing.AvailableTrades++;
+                }
+                else
+                {
+                    ratios.Add(new MarketRatio
+                    {
+                        MarketGetRate = getRate,
+                        MarketGiveRate = giveRate,
+                        AvailableTrades = 1,
+                    });
+                }
+            }
+
+            return ratios
+                .OrderByDescending(ratio =>
+                    ratio.MarketGetRate / ratio.MarketGiveRate)
+                .ToList();
         }
 
         private void MyLogMessage(string message)

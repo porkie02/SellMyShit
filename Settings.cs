@@ -110,6 +110,13 @@ namespace SellMyShit
             InterfaceGroupId)]
         public ToggleNode SortAscending { get; set; } = new(false);
 
+        // flipped by the Attach/Detach button in the owned items window, so it stays out of the menu
+        [IgnoreMenu]
+        public ToggleNode AttachToExchangeWindow { get; set; } = new(true);
+
+        [IgnoreMenu]
+        public TextNode AttachDirection { get; set; } = new("Left");
+
         [Menu(
             "Show Debug Messages?",
             null,
