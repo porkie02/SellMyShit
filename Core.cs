@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -7,6 +8,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ExileCore;
+using ExileCore.PoEMemory;
+using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements.Village;
 using ExileCore.PoEMemory.Models;
 using ExileCore.Shared;
@@ -25,6 +28,22 @@ namespace SellMyShit
         private const int SortByName = 0;
         private const int SortByValue = 1;
         private const int SortByOwned = 2;
+
+        // the exchange window holds a static 10 offers; selection and queueing both stop there
+        private const int MaxTradeOffers = 10;
+
+        private const int ColumnSelect = 0;
+        private const int ColumnName = 1;
+        private const int ColumnValue = 2;
+        private const int ColumnOwned = 3;
+
+        private readonly List<string> _selectedCurrencies = new();
+        private readonly List<CurrencyExchangeCurrencyPickerCurrencyOption> _bulkSellQueue = new();
+
+        private bool _collectRunning;
+        private DateTime _collectStartedUtc;
+        private int _collectClicks;
+        private readonly HashSet<long> _collectClickedAddresses = new();
 
         private Func<BaseItemType, double> _getNinjaBaseItemTypeValue;
 
@@ -159,6 +178,10 @@ namespace SellMyShit
                 var ownedItems =
                     GetCurrencyExchangeItems(currencyExchangePanel);
 
+                ProcessBulkQueue(ownedItems);
+
+                ProcessCollectCompleted(currencyExchangePanel);
+
                 if (SellSequenceStep.Idle == _sellSequenceStep) DrawOwnedItemsUi(ownedItems);
             }
             catch (Exception ex)
@@ -203,6 +226,11 @@ namespace SellMyShit
                 if (options == null)
                     return _currencyExchangeItemsCache;
 
+                // the picker can hand out the same currency twice (recycled rows), which shows up
+                // as duplicate table rows and duplicate ImGui IDs; keep the first of each name
+                var seenNames =
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                 _currencyExchangeItemsCache = options
                     .Where(item =>
                         item?.Children != null &&
@@ -211,7 +239,9 @@ namespace SellMyShit
                     .Where(item =>
                         !Settings.IsCurrencyExcluded(
                             GetItemName(item)))
-                    .Distinct()
+                    .Where(item =>
+                        !LooksLikeAddress(GetItemName(item)))
+                    .Where(item => seenNames.Add(GetItemName(item)))
                     .ToList();
 
                 _currencyExchangeItemsCacheInitialized = true;
@@ -226,6 +256,356 @@ namespace SellMyShit
 
                 return _currencyExchangeItemsCache;
             }
+        }
+
+        private static bool LooksLikeAddress(string name) =>
+            name.Length >= 8 && name.All(Uri.IsHexDigit);
+
+        private bool IsSelected(string name) =>
+            _selectedCurrencies.Any(selected =>
+                string.Equals(selected, name, StringComparison.OrdinalIgnoreCase));
+
+        private void SetSelected(string name, bool selected)
+        {
+            if (selected)
+            {
+                if (_selectedCurrencies.Count >= MaxTradeOffers ||
+                    IsSelected(name))
+                {
+                    return;
+                }
+
+                _selectedCurrencies.Add(name);
+                return;
+            }
+
+            _selectedCurrencies.RemoveAll(selectedName =>
+                string.Equals(selectedName, name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // every order still on the board takes one of the 10 slots, including completed ones that
+        // have not been collected; only cancelled orders free a slot
+        private int GetListedOfferCount()
+        {
+            var orders = GetCurrencyExchangePanel()?.Orders;
+
+            if (orders == null)
+                return MaxTradeOffers;
+
+            return orders.Count(order =>
+                order != null && !order.IsCanceled);
+        }
+
+        private int GetRemainingOfferCapacity() =>
+            Math.Max(0, MaxTradeOffers - GetListedOfferCount());
+
+        private void StartBulkSell()
+        {
+            if (_sellSequenceStep != SellSequenceStep.Idle)
+                return;
+
+            var capacity = Math.Min(
+                GetRemainingOfferCapacity(),
+                MaxTradeOffers);
+
+            if (capacity <= 0)
+                return;
+
+            _bulkSellQueue.Clear();
+
+            foreach (var name in _selectedCurrencies)
+            {
+                if (_bulkSellQueue.Count >= capacity)
+                    break;
+
+                // keep the option itself: the picker is empty while no list is open, so a name
+                // lookup at start time would fail
+                var item = _currencyExchangeItemsCache.FirstOrDefault(option =>
+                    string.Equals(
+                        GetItemName(option),
+                        name,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (item != null)
+                    _bulkSellQueue.Add(item);
+            }
+
+            _selectedCurrencies.Clear();
+
+            LogMessage(
+                $"Bulk: queued {capacity} item(s), " +
+                $"{GetListedOfferCount()} already listed.");
+        }
+
+        private void ProcessBulkQueue(
+            List<CurrencyExchangeCurrencyPickerCurrencyOption> ownedItems)
+        {
+            if (_sellSequenceStep != SellSequenceStep.Idle ||
+                _bulkSellQueue.Count == 0)
+            {
+                return;
+            }
+
+            if (GetRemainingOfferCapacity() <= 0)
+            {
+                LogMessage(
+                    $"Bulk: offer slots full ({GetListedOfferCount()}/" +
+                    $"{MaxTradeOffers}), stopping with " +
+                    $"{_bulkSellQueue.Count} item(s) queued.");
+
+                _bulkSellQueue.Clear();
+                return;
+            }
+
+            var item = _bulkSellQueue[0];
+            _bulkSellQueue.RemoveAt(0);
+
+            var name = GetItemName(item);
+            var rect = item.GetClientRect();
+
+            if (item.IsValid && rect.Width > 0 && rect.Height > 0)
+            {
+                LogMessage(
+                    $"Bulk: starting {name} " +
+                    $"({_bulkSellQueue.Count} left).");
+
+                StartSellSequence(item);
+                return;
+            }
+
+            // the stored element went stale; try the freshly built list by name
+            var fresh = ownedItems?.FirstOrDefault(option =>
+                string.Equals(
+                    GetItemName(option),
+                    name,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (fresh != null)
+            {
+                LogMessage(
+                    $"Bulk: starting {name} " +
+                    $"({_bulkSellQueue.Count} left, refreshed element).");
+
+                StartSellSequence(fresh);
+                return;
+            }
+
+            LogMessage(
+                $"Bulk: {name} is no longer in the list, skipping " +
+                $"({_bulkSellQueue.Count} left).");
+        }
+
+        private void StartCollect()
+        {
+            _collectRunning = true;
+            _collectStartedUtc = DateTime.UtcNow;
+            _collectClicks = 0;
+            _collectClickedAddresses.Clear();
+
+            var panel = GetCurrencyExchangePanel();
+
+            LogMessage(
+                "Collect: " +
+                $"{panel?.Orders?.Count(order => order != null && order.IsCompleted && !order.IsCanceled) ?? 0} " +
+                $"completed of {panel?.Orders?.Count ?? 0} order(s), " +
+                $"{panel?.OrderElements?.Count ?? 0} row element(s).");
+
+            var rows = CompletedOrderRows(panel);
+
+            if (rows == null)
+                return;
+
+            // keep the press cheap; the tree is dumped on failure from ProcessCollectCompleted
+        }
+
+        private void LogRowTree(Element element, int depth)
+        {
+            if (element == null || depth > 2)
+                return;
+
+            var rect = element.GetClientRect();
+            var text = element.TextNoTags?.Trim();
+
+            LogMessage(
+                $"Collect: {(depth == 0 ? "row" : "child")} " +
+                $"d{depth} addr={element.Address} " +
+                $"rect={rect.Left},{rect.Top},{rect.Width},{rect.Height} " +
+                $"tex='{element.TextureName}' " +
+                $"entity='{element.Entity?.Path}' " +
+                $"text='{text}'.");
+
+            var children = element.Children;
+
+            if (children == null)
+                return;
+
+            foreach (var child in children)
+                LogRowTree(child, depth + 1);
+        }
+
+        private void ProcessCollectCompleted(CurrencyExchangePanel currencyExchangePanel)
+        {
+            if (!_collectRunning)
+                return;
+
+            if (_sellSequenceStep != SellSequenceStep.Idle ||
+                currencyExchangePanel?.IsVisible != true)
+            {
+                _collectRunning = false;
+                return;
+            }
+
+            if (IsGameInputBusy())
+                return;
+
+            if ((DateTime.UtcNow - _collectStartedUtc).TotalSeconds > 15 ||
+                _collectClicks > 60)
+            {
+                _collectRunning = false;
+                return;
+            }
+
+            var target = FindNextCollectTarget(
+                currencyExchangePanel,
+                _collectClickedAddresses);
+
+            if (target == null)
+            {
+                if (_collectClicks == 0)
+                {
+                    LogError(
+                        "Collect: no item slot found in the completed rows.");
+
+                    var rows = CompletedOrderRows(currencyExchangePanel);
+
+                    if (rows != null)
+                    {
+                        foreach (var row in rows.Take(2))
+                            LogRowTree(row, 0);
+                    }
+                }
+
+                _collectRunning = false;
+                return;
+            }
+
+            if (QueueGameCtrlShiftRightClick(target.GetClientRect().Center))
+            {
+                var rect = target.GetClientRect();
+
+                _collectClickedAddresses.Add(target.Address);
+                _collectClicks++;
+
+                LogMessage(
+                    $"Collect: ctrl+shift+right-clicked slot " +
+                    $"{rect.Left},{rect.Top} {rect.Width}x{rect.Height} " +
+                    $"({target.Address}).");
+            }
+        }
+
+        private static Element FindNextCollectTarget(
+            CurrencyExchangePanel currencyExchangePanel,
+            HashSet<long> clicked)
+        {
+            var rows = CompletedOrderRows(currencyExchangePanel);
+
+            if (rows == null)
+                return null;
+
+            foreach (var row in rows)
+            {
+                var item = FindItemElement(row, clicked);
+
+                if (item != null)
+                    return item;
+            }
+
+            return null;
+        }
+
+        private static List<Element> CompletedOrderRows(
+            CurrencyExchangePanel currencyExchangePanel)
+        {
+            var elements = currencyExchangePanel?.OrderElements;
+
+            if (elements == null || elements.Count == 0)
+                return null;
+
+            // the order ids do not line up with PlayerOrderId, but every finished row carries an
+            // "Order Completed" label; rows without it are still listed and must not be touched
+            var rows = elements
+                .Where(element => element != null &&
+                                  HasCompletedLabel(element) &&
+                                  element.GetClientRect().Width > 0)
+                .Select(element => (Element)element)
+                .ToList();
+
+            return rows.Count > 0 ? rows : null;
+        }
+
+        private static bool HasCompletedLabel(Element row, int depth = 0)
+        {
+            var children = row?.Children;
+
+            if (children == null || depth > 2)
+                return false;
+
+            foreach (var child in children)
+            {
+                var text = child?.TextNoTags;
+
+                if (!string.IsNullOrWhiteSpace(text) &&
+                    text.Replace(" ", string.Empty)
+                        .Contains("completed", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (HasCompletedLabel(child, depth + 1))
+                    return true;
+            }
+
+            return false;
+        }
+
+        // completed orders draw the two currencies as plain 72x72 icon slots; nothing is attached
+        // to them (no Entity, no text), so the slot size is what identifies them
+        private static bool IsItemSlot(Element element)
+        {
+            if (element == null)
+                return false;
+
+            var rect = element.GetClientRect();
+
+            return rect.Width >= 60 &&
+                   rect.Width <= 100 &&
+                   rect.Height >= 60 &&
+                   rect.Height <= 100 &&
+                   Math.Abs(rect.Width - rect.Height) <= 6;
+        }
+
+        private static Element FindItemElement(Element element, HashSet<long> clicked, int depth = 0)
+        {
+            if (element == null || depth > 3)
+                return null;
+
+            if (!clicked.Contains(element.Address) && IsItemSlot(element))
+                return element;
+
+            var children = element.Children;
+
+            if (children == null)
+                return null;
+
+            foreach (var child in children)
+            {
+                var found = FindItemElement(child, clicked, depth + 1);
+
+                if (found != null)
+                    return found;
+            }
+
+            return null;
         }
 
         private IReadOnlyList<CurrencyExchangeCurrencyPickerCurrencyOption>
@@ -379,6 +759,47 @@ namespace SellMyShit
 
             ImGui.Text(
                 $"Owned Items: {filteredItems.Count} / {ownedItems.Count}");
+
+            var capacity = GetRemainingOfferCapacity();
+            var selectedCount = Math.Min(_selectedCurrencies.Count, capacity);
+            var offersText =
+                $"offers {GetListedOfferCount()}/{MaxTradeOffers}";
+
+            var controlsWidth =
+                ImGui.CalcTextSize($"Sell selected ({selectedCount})").X +
+                ImGui.CalcTextSize("Clear").X +
+                ImGui.CalcTextSize(offersText).X +
+                ImGui.CalcTextSize("Collect").X +
+                style.FramePadding.X * 8 +
+                style.ItemSpacing.X * 4;
+
+            if (ImGui.GetContentRegionAvail().X >= controlsWidth)
+                ImGui.SameLine();
+
+            ImGui.BeginDisabled(_selectedCurrencies.Count == 0 || capacity <= 0);
+
+            if (ImGui.SmallButton($"Sell selected ({selectedCount})"))
+                StartBulkSell();
+
+            ImGui.EndDisabled();
+
+            ImGui.SameLine();
+
+            if (ImGui.SmallButton("Clear"))
+                _selectedCurrencies.Clear();
+
+            ImGui.SameLine();
+
+            ImGui.TextDisabled(offersText);
+
+            ImGui.SameLine();
+
+            ImGui.BeginDisabled(_collectRunning);
+
+            if (ImGui.SmallButton("Collect"))
+                StartCollect();
+
+            ImGui.EndDisabled();
 
             ImGui.Separator();
 
@@ -543,12 +964,17 @@ namespace SellMyShit
 
             if (!ImGui.BeginTable(
                     "CurrencyOwnedItemsTable",
-                    4,
+                    5,
                     tableFlags))
             {
                 return;
             }
 
+            ImGui.TableSetupColumn(
+                "##select",
+                ImGuiTableColumnFlags.WidthFixed |
+                ImGuiTableColumnFlags.NoSort,
+                26f);
 
             var defaultSortByColum = Settings.SortBy.Value;
 
@@ -581,7 +1007,7 @@ namespace SellMyShit
                 "Action",
                 ImGuiTableColumnFlags.WidthFixed |
                 ImGuiTableColumnFlags.NoSort,
-                58f);
+                120f);
 
             // ImGui erzeugt die klickbaren Header und Sortierpfeile.
             ImGui.TableHeadersRow();
@@ -661,8 +1087,25 @@ namespace SellMyShit
 
             ImGui.TableNextColumn();
 
-            ImGui.TextUnformatted(
-                GetItemName(item));
+            var name = GetItemName(item);
+            var selected = IsSelected(name);
+
+            ImGui.PushID(index);
+
+            ImGui.BeginDisabled(
+                !selected &&
+                _selectedCurrencies.Count >= MaxTradeOffers);
+
+            if (ImGui.Checkbox("##select", ref selected))
+                SetSelected(name, selected);
+
+            ImGui.EndDisabled();
+
+            ImGui.PopID();
+
+            ImGui.TableNextColumn();
+
+            ImGui.TextUnformatted(name);
 
             ImGui.TableNextColumn();
 
@@ -683,6 +1126,23 @@ namespace SellMyShit
 
             if (ImGui.SmallButton($"Sell##{index}"))
                 StartSellSequence(item);
+
+            ImGui.SameLine();
+
+            if (ImGui.SmallButton($"Ignore##{index}"))
+            {
+                Settings.AddExcludedCurrency(name);
+
+                _selectedCurrencies.RemoveAll(selected =>
+                    string.Equals(
+                        selected,
+                        name,
+                        StringComparison.OrdinalIgnoreCase));
+
+                _currencyExchangeItemsCacheInitialized = false;
+
+                AddDebugMessage($"Excluded {name}.");
+            }
         }
 
         private int CompareItems(
@@ -756,8 +1216,8 @@ namespace SellMyShit
         {
             return column switch
             {
-                SortByName => SortOptions.Name,
-                SortByOwned => SortOptions.Owned,
+                ColumnName => SortOptions.Name,
+                ColumnOwned => SortOptions.Owned,
                 _ => SortOptions.Value
             };
         }
@@ -1456,6 +1916,14 @@ namespace SellMyShit
                         if (marketRatioPanel.Text.Contains("Retrieving"))
                         {
                             AddDebugMessage("Market ratio panel not loaded yet, retrying...");
+
+                            // a stockless item can leave this on "Retrieving" forever
+                            if (TimeInCurrentStep() > TimeSpan.FromSeconds(5))
+                            {
+                                SkipSellSequence(
+                                    "market ratio stayed on Retrieving");
+                            }
+
                             break;
                         }
 
@@ -1489,6 +1957,14 @@ namespace SellMyShit
 
                         if (marketRatioPanelTooltip == null)
                         {
+                            // no tooltip at all usually means no stock; don't wait for the step
+                            // timeout to notice
+                            if (TimeInCurrentStep() > TimeSpan.FromSeconds(5))
+                            {
+                                SkipSellSequence(
+                                    "no market ratio tooltip (item has no stock)");
+                            }
+
                             break;
                         }
 
@@ -1526,8 +2002,17 @@ namespace SellMyShit
                         var marketRatioPanelTooltip = marketRatioPanel?.Tooltip;
 
 
-                        if (!marketRatioPanelTooltip.Children.Any(child => child.Text == "Competing Trades"))
+                        if (marketRatioPanelTooltip == null ||
+                            !marketRatioPanelTooltip.Children.Any(child => child.Text == "Competing Trades"))
                         {
+                            // no competing trades appears when the item has no stock; do not sit
+                            // here until the whole sequence times out
+                            if (TimeInCurrentStep() > TimeSpan.FromSeconds(5))
+                            {
+                                SkipSellSequence(
+                                    "no competing trades (item has no stock)");
+                            }
+
                             break;
                         }
 
@@ -1550,7 +2035,8 @@ namespace SellMyShit
 
                         if (_pendingMarketRatio == null || _pendingMarketRatio.MarketGetRate <= 0 || _pendingMarketRatio.MarketGiveRate <= 0)
                         {
-                            break;
+                            SkipSellSequence(
+                                "no usable market ratio for this item");
                         }
 
                         AddDebugMessage(
@@ -1581,10 +2067,18 @@ namespace SellMyShit
 
                         var marketRateGive = currencyExchangePanel.MarketRateGive;
 
-                        if (marketRatio.MarketGetRate <= 0 ||
+                        if (marketRatio == null ||
+                            marketRatio.MarketGetRate <= 0 ||
                             marketRatio.MarketGiveRate <= 0)
                         {
-                            break;
+                            var ratioPanel = currencyExchangePanel.GetChildAtIndex(
+                                Settings.MarketRatioPanelIndex.Value);
+
+                            if (ratioPanel?.Text?.Contains("Retrieving") == true)
+                                break; // still loading; the step timeout guards this
+
+                            SkipSellSequence(
+                                "no usable market ratio for this item");
                         }
 
                         AddDebugMessage(
@@ -1879,7 +2373,20 @@ namespace SellMyShit
                         if (IsGameInputBusy())
                             break;
 
-                        if (Settings.RestoreMousePosition) { QueueGameMove(storedMousePosition); storedMousePosition = new Point(); }
+                        if (Settings.RestoreMousePosition && storedMousePosition.X > 0)
+                        {
+                            var windowLocation =
+                                GameController.Window
+                                    .GetWindowRectangleReal()
+                                    .Location;
+
+                            QueueGameMove(
+                                new Vector2(
+                                    storedMousePosition.X - windowLocation.X,
+                                    storedMousePosition.Y - windowLocation.Y));
+
+                            storedMousePosition = new Point();
+                        }
                         StopSellSequence();
                         break;
                     }
@@ -1949,6 +2456,17 @@ namespace SellMyShit
 
             AddDebugMessage(
                 $"Sell sequence step: {step}");
+        }
+
+        private void SkipSellSequence(string reason)
+        {
+            LogError(
+                $"SellMyShit: skipping {_pendingSellItemName}: {reason}.");
+
+            if (_bulkSellQueue.Count > 0)
+                LogMessage($"Bulk: {_bulkSellQueue.Count} item(s) left in the queue.");
+
+            StopSellSequence();
         }
 
         private void StopSellSequence()
@@ -2030,9 +2548,6 @@ namespace SellMyShit
         private bool QueueGameClick(
             Vector2 screenPosition)
         {
-
-            screenPosition = screenPosition + GameController.Window.GetWindowRectangleReal().Location;
-
             var overlayHideMilliseconds =
                 Settings.ClickOverlayHideMilliseconds.Value;
 
@@ -2048,53 +2563,24 @@ namespace SellMyShit
             var mouseSettleDelayMilliseconds =
                 Settings.MouseSettleDelayMilliseconds.Value;
 
-            var mouseButtonHoldMilliseconds =
-                Settings.MouseButtonHoldMilliseconds.Value;
-
-
-
             return QueueGameInput(
                 overlayHideMilliseconds,
                 releaseDelayMilliseconds,
                 "Game click failed",
                 gameWindowHandle =>
                 {
-                    Thread.Sleep(
-                        preFocusDelayMilliseconds);
+                    Thread.Sleep(preFocusDelayMilliseconds);
+                    Thread.Sleep(postFocusDelayMilliseconds);
 
-
-
-
-
-                    Thread.Sleep(
-                        postFocusDelayMilliseconds);
-
-                    var moved =
-                        MouseInput.Mouse.MoveMouse(
-                            screenPosition);
-
-                    AddDebugMessage(
-                        $"Moved mouse: {moved}, " +
-                        $"position: {screenPosition}");
-
-                    Thread.Sleep(
-                        mouseSettleDelayMilliseconds);
-
-                    var clicked =
-                        MouseInput.Mouse.LeftClick(
-                            mouseButtonHoldMilliseconds);
-
-                    AddDebugMessage(
-                        $"Clicked PoE: {clicked}");
+                    Input.SetCursorPos(screenPosition);
+                    Thread.Sleep(mouseSettleDelayMilliseconds);
+                    Input.Click(MouseButtons.Left);
                 });
         }
 
-        private bool QueueGameMove(
-    Vector2 screenPosition)
+        private bool QueueGameCtrlShiftRightClick(
+            Vector2 screenPosition)
         {
-
-            screenPosition = screenPosition + GameController.Window.GetWindowRectangleReal().Location;
-
             var overlayHideMilliseconds =
                 Settings.ClickOverlayHideMilliseconds.Value;
 
@@ -2110,10 +2596,57 @@ namespace SellMyShit
             var mouseSettleDelayMilliseconds =
                 Settings.MouseSettleDelayMilliseconds.Value;
 
-            var mouseButtonHoldMilliseconds =
-                Settings.MouseButtonHoldMilliseconds.Value;
+            return QueueGameInput(
+                overlayHideMilliseconds,
+                releaseDelayMilliseconds,
+                "Game ctrl+shift right click failed",
+                gameWindowHandle =>
+                {
+                    Thread.Sleep(preFocusDelayMilliseconds);
+                    Thread.Sleep(postFocusDelayMilliseconds);
 
+                    Input.KeyDown(Keys.LControlKey);
+                    Input.KeyDown(Keys.LShiftKey);
 
+                    try
+                    {
+                        Input.SetCursorPos(screenPosition);
+                        Thread.Sleep(mouseSettleDelayMilliseconds);
+                        Input.Click(MouseButtons.Right);
+                    }
+                    finally
+                    {
+                        Input.KeyUp(Keys.LShiftKey);
+                        Input.KeyUp(Keys.LControlKey);
+                    }
+                });
+        }
+
+        private static void RunHumanizedInput(IEnumerator enumerator)
+        {
+            if (enumerator == null)
+                return;
+
+            var guard = 0;
+
+            while (enumerator.MoveNext() && guard++ < 5000)
+                Thread.Sleep(1);
+        }
+
+        private bool QueueGameMove(
+            Vector2 screenPosition)
+        {
+            var overlayHideMilliseconds =
+                Settings.ClickOverlayHideMilliseconds.Value;
+
+            var releaseDelayMilliseconds =
+                Settings.ClickReleaseDelayMilliseconds.Value;
+
+            var preFocusDelayMilliseconds =
+                Settings.ClickPreFocusDelayMilliseconds.Value;
+
+            var postFocusDelayMilliseconds =
+                Settings.ClickPostFocusDelayMilliseconds.Value;
 
             return QueueGameInput(
                 overlayHideMilliseconds,
@@ -2121,28 +2654,10 @@ namespace SellMyShit
                 "Game click failed",
                 gameWindowHandle =>
                 {
-                    Thread.Sleep(
-                        preFocusDelayMilliseconds);
+                    Thread.Sleep(preFocusDelayMilliseconds);
+                    Thread.Sleep(postFocusDelayMilliseconds);
 
-
-
-
-
-
-                    Thread.Sleep(
-                        postFocusDelayMilliseconds);
-
-                    var moved =
-                        MouseInput.Mouse.MoveMouse(
-                            screenPosition);
-
-                    AddDebugMessage(
-                        $"Moved mouse: {moved}, " +
-                        $"position: {screenPosition}");
-
-                    Thread.Sleep(
-                        mouseSettleDelayMilliseconds);
-
+                    Input.SetCursorPos(screenPosition);
                 });
         }
 

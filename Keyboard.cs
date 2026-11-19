@@ -16,6 +16,7 @@ namespace KeyboardInput
 
         private const ushort VkControl = 0x11;
         private const ushort VkA = 0x41;
+        private const ushort VkShift = 0x10;
 
         private const int VkMenu = 0x12;
         private const int VkLeftMenu = 0xA4;
@@ -143,8 +144,7 @@ namespace KeyboardInput
         /// <summary>
         /// Releases left Alt.
         /// </summary>
-        public static bool AltKeyUp()
-        {
+        public static bool AltKeyUp()        {
             var sent = Send(
             [
                 CreateScanCodeInput(
@@ -161,6 +161,26 @@ namespace KeyboardInput
         {
             return IsKeyDown(VkMenu) ||
                    IsKeyDown(VkLeftMenu);
+        }
+
+        /// <summary>Holds Ctrl and Shift down together, for modifier clicks.</summary>
+        public static bool CtrlShiftDown()
+        {
+            return Send(
+            [
+                CreateVirtualKeyInput(VkControl, keyUp: false),
+                CreateVirtualKeyInput(VkShift, keyUp: false)
+            ]);
+        }
+
+        /// <summary>Releases Shift and Ctrl.</summary>
+        public static bool CtrlShiftUp()
+        {
+            return Send(
+            [
+                CreateVirtualKeyInput(VkShift, keyUp: true),
+                CreateVirtualKeyInput(VkControl, keyUp: true)
+            ]);
         }
 
         public static bool TypeText(string text)

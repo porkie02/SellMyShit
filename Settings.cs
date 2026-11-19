@@ -378,6 +378,31 @@ namespace SellMyShit
                     StringComparison.OrdinalIgnoreCase));
         }
 
+        /// <summary>Adds a currency to the excluded list the settings editor uses.</summary>
+        public void AddExcludedCurrency(string currencyName)
+        {
+            if (string.IsNullOrWhiteSpace(currencyName))
+                return;
+
+            var name = currencyName.Trim();
+            var list = new List<string>(GetExcludedCurrencies());
+
+            if (list.Any(excluded => string.Equals(
+                    excluded,
+                    name,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            list.Add(name);
+            list = list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+            _excludedCurrencies = list;
+            ExcludedCurrenciesJson.Value = JsonConvert.SerializeObject(list);
+            _loadedExcludedCurrenciesJson = ExcludedCurrenciesJson.Value;
+        }
+
         private void DrawExcludedCurrenciesEditor()
         {
             var excludedCurrencies = GetExcludedCurrencies();
