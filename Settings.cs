@@ -47,7 +47,8 @@ namespace SellMyShit
                 {
                     SortOptions.Name,
                     SortOptions.Value,
-                    SortOptions.Owned
+                    SortOptions.Owned,
+                    SortOptions.Each
                 });
 
 
@@ -574,6 +575,7 @@ namespace SellMyShit
         public const string Name = "Name";
         public const string Value = "Value";
         public const string Owned = "Owned";
+        public const string Each = "Each";
     }
 
 }

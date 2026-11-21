@@ -38,14 +38,16 @@ namespace SellMyShit
         private const int SortByName = 0;
         private const int SortByValue = 1;
         private const int SortByOwned = 2;
+        private const int SortByEach = 3;
 
         // the exchange window holds a static 10 offers; selection and queueing both stop there
         private const int MaxTradeOffers = 10;
 
         private const int ColumnSelect = 0;
         private const int ColumnName = 1;
-        private const int ColumnValue = 2;
+        private const int ColumnEach = 2;
         private const int ColumnOwned = 3;
+        private const int ColumnValue = 4;
 
         private readonly List<string> _selectedCurrencies = new();
         private readonly List<OwnedCurrency> _bulkSellQueue = new();
@@ -979,7 +981,7 @@ namespace SellMyShit
 
             if (!ImGui.BeginTable(
                     "CurrencyOwnedItemsTable",
-                    5,
+                    6,
                     tableFlags))
             {
                 return;
@@ -1002,13 +1004,13 @@ namespace SellMyShit
                 nameTableFlags,
                 3f);
 
-            var valueTableFlags = ImGuiTableColumnFlags.WidthStretch |
+            var eachTableFlags = ImGuiTableColumnFlags.WidthStretch |
                 ImGuiTableColumnFlags.PreferSortDescending;
-            if (defaultSortByColum == "Value") valueTableFlags |= ImGuiTableColumnFlags.DefaultSort;
+            if (defaultSortByColum == SortOptions.Each) eachTableFlags |= ImGuiTableColumnFlags.DefaultSort;
             ImGui.TableSetupColumn(
-                "Value",
-                valueTableFlags,
-                2f);
+                "Each (c)",
+                eachTableFlags,
+                1.6f);
 
             var ownedTableFlags = ImGuiTableColumnFlags.WidthStretch |
                 ImGuiTableColumnFlags.PreferSortDescending;
@@ -1017,6 +1019,15 @@ namespace SellMyShit
                 "Owned",
                 ownedTableFlags,
                 1.4f);
+
+            // "Value" in settings has always meant the total for the whole stack
+            var valueTableFlags = ImGuiTableColumnFlags.WidthStretch |
+                ImGuiTableColumnFlags.PreferSortDescending;
+            if (defaultSortByColum == "Value") valueTableFlags |= ImGuiTableColumnFlags.DefaultSort;
+            ImGui.TableSetupColumn(
+                "Total (c)",
+                valueTableFlags,
+                1.8f);
 
             ImGui.TableSetupColumn(
                 "Action",
@@ -1126,17 +1137,26 @@ namespace SellMyShit
 
             ImGui.TableNextColumn();
 
-            var totalValue =
-                GetTotalNinjaValue(item);
+            var unitValue = GetUnitNinjaValue(item);
 
             ImGui.TextUnformatted(
-                totalValue.ToString(
+                unitValue.ToString(
+                    unitValue >= 100 ? "0" : "0.##",
                     CultureInfo.InvariantCulture));
 
             ImGui.TableNextColumn();
 
             ImGui.TextUnformatted(
                 item.Owned.ToString(
+                    CultureInfo.InvariantCulture));
+
+            ImGui.TableNextColumn();
+
+            var totalValue =
+                GetTotalNinjaValue(item);
+
+            ImGui.TextUnformatted(
+                totalValue.ToString(
                     CultureInfo.InvariantCulture));
 
             ImGui.TableNextColumn();
@@ -1197,6 +1217,16 @@ namespace SellMyShit
                         ? left.Owned.CompareTo(right.Owned)
                         : right.Owned.CompareTo(left.Owned);
 
+                case SortByEach:
+                    {
+                        var leftEach = GetUnitNinjaValue(left);
+                        var rightEach = GetUnitNinjaValue(right);
+
+                        return ascending
+                            ? leftEach.CompareTo(rightEach)
+                            : rightEach.CompareTo(leftEach);
+                    }
+
                 case SortByName:
                 default:
                     {
@@ -1225,6 +1255,7 @@ namespace SellMyShit
             {
                 SortOptions.Name => SortByName,
                 SortOptions.Owned => SortByOwned,
+                SortOptions.Each => SortByEach,
                 _ => SortByValue
             };
         }
@@ -1235,6 +1266,7 @@ namespace SellMyShit
             {
                 ColumnName => SortOptions.Name,
                 ColumnOwned => SortOptions.Owned,
+                ColumnEach => SortOptions.Each,
                 _ => SortOptions.Value
             };
         }
@@ -3003,6 +3035,11 @@ namespace SellMyShit
             return _baseItemTypesByName.GetValueOrDefault(GetItemName(option))
                    ?? itemType;
         }
+
+        private double GetUnitNinjaValue(OwnedCurrency item) =>
+            item != null && TryGetNinjaValue(item, out var unitValue)
+                ? unitValue
+                : 0;
 
         private double GetTotalNinjaValue(
             OwnedCurrency item)
