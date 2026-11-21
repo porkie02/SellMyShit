@@ -34,7 +34,14 @@ namespace SellMyShit
 
     public class Core : BaseSettingsPlugin<Settings>
     {
-        private const string WantedCurrencyName = "Chaos Orb";
+        // fixed when a sale starts, so changing the setting mid-sale cannot mix currencies
+        private string _activeWantedCurrency;
+
+        private string WantedCurrencyName =>
+            _activeWantedCurrency ?? GetConfiguredWantedCurrency();
+
+        private int _plannedOfferAmount;
+        private int _plannedWantAmount;
         private const int SortByName = 0;
         private const int SortByValue = 1;
         private const int SortByOwned = 2;
@@ -110,6 +117,12 @@ namespace SellMyShit
 
                 if (Array.IndexOf(AttachDirections, Settings.AttachDirection.Value) < 0)
                     Settings.AttachDirection.Value = "Left";
+
+                Settings.WantedCurrency ??= new ListNode { Value = WantedCurrencies.Chaos };
+                Settings.WantedCurrency.SetListValues(WantedCurrencies.All.ToList());
+
+                if (!WantedCurrencies.All.Contains(Settings.WantedCurrency.Value))
+                    Settings.WantedCurrency.Value = WantedCurrencies.Chaos;
             }
 
             return true;
@@ -818,6 +831,10 @@ namespace SellMyShit
 
             ImGui.EndDisabled();
 
+            ImGui.SameLine();
+
+            DrawWantedCurrencyPicker();
+
             ImGui.Separator();
 
             var childSize = new NumVector2(
@@ -839,6 +856,41 @@ namespace SellMyShit
 
             ImGui.EndChild();
             ImGui.End();
+        }
+
+        private string GetConfiguredWantedCurrency()
+        {
+            var value = Settings?.WantedCurrency?.Value;
+
+            return WantedCurrencies.All.Contains(value)
+                ? value
+                : WantedCurrencies.Chaos;
+        }
+
+        private void DrawWantedCurrencyPicker()
+        {
+            var current = GetConfiguredWantedCurrency();
+
+            ImGui.SetNextItemWidth(
+                ImGui.CalcTextSize("Divine Orb").X +
+                ImGui.GetStyle().FramePadding.X * 2 +
+                ImGui.GetFrameHeight());
+
+            if (!ImGui.BeginCombo("##wantedCurrency", current))
+            {
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Currency to sell for");
+
+                return;
+            }
+
+            foreach (var option in WantedCurrencies.All)
+            {
+                if (ImGui.Selectable(option, option == current))
+                    Settings.WantedCurrency.Value = option;
+            }
+
+            ImGui.EndCombo();
         }
 
         private static readonly string[] AttachDirections =
@@ -2203,8 +2255,31 @@ namespace SellMyShit
                         if (IsGameInputBusy())
                             break;
 
+                        if (_pendingMarketRatio == null ||
+                            _pendingMarketRatio.MarketGetRate <= 0 ||
+                            _pendingMarketRatio.MarketGiveRate <= 0)
+                        {
+                            SkipSellSequence("no usable market ratio for this item");
+                            break;
+                        }
+
+                        if (!TryPlanListing(
+                                ownedAmount,
+                                out _plannedOfferAmount,
+                                out _plannedWantAmount))
+                        {
+                            SkipSellSequence(
+                                $"{ownedAmount} {itemName} is worth less than 1 {WantedCurrencyName}");
+
+                            break;
+                        }
+
+                        AddDebugMessage(
+                            $"Listing {_plannedOfferAmount} of {ownedAmount} {itemName} " +
+                            $"for {_plannedWantAmount} {WantedCurrencyName}.");
+
                         var offeredValue =
-                            ownedAmount.ToString(
+                            _plannedOfferAmount.ToString(
                                 CultureInfo.InvariantCulture);
 
                         if (QueueGameTextReplacement(offeredValue))
@@ -2271,11 +2346,13 @@ namespace SellMyShit
                             $"{_pendingMarketRatio.MarketGetRate}:{_pendingMarketRatio.MarketGiveRate}");
 
                         var wantedValue =
-                            CalculateWantedAmount(
-                                ownedAmount,
-                                _pendingMarketRatio.MarketGetRate,
-                                _pendingMarketRatio.MarketGiveRate,
-                                Settings.ListingPricePercent.Value);
+                            _plannedWantAmount > 0
+                                ? _plannedWantAmount
+                                : CalculateWantedAmount(
+                                    ownedAmount,
+                                    _pendingMarketRatio.MarketGetRate,
+                                    _pendingMarketRatio.MarketGiveRate,
+                                    Settings.ListingPricePercent.Value);
 
                         if (wantedValue <= 0)
                         {
@@ -2492,6 +2569,19 @@ namespace SellMyShit
                 AddDebugMessage($"Focused PoE: {focused}");
             }
 
+            if (string.Equals(
+                    item.Name,
+                    GetConfiguredWantedCurrency(),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                LogMessage($"SellMyShit: can't sell {item.Name} for {item.Name}, skipping.");
+                return;
+            }
+
+            _activeWantedCurrency = GetConfiguredWantedCurrency();
+            _plannedOfferAmount = 0;
+            _plannedWantAmount = 0;
+
             // the picker row is looked up by name once the search results are showing
             _pendingSellItem = null;
             _pendingSellItemName = item.Name;
@@ -2499,7 +2589,8 @@ namespace SellMyShit
 
             AddDebugMessage(
                 $"Started sell sequence for {_pendingSellItemName}, " +
-                $"owned amount: {_pendingSellOwnedAmount}.");
+                $"owned amount: {_pendingSellOwnedAmount}, " +
+                $"selling for {_activeWantedCurrency}.");
 
             SetSellSequenceStep(SellSequenceStep.Start);
         }
@@ -2567,6 +2658,10 @@ namespace SellMyShit
             _pendingSellItemName = string.Empty;
             _pendingSellOwnedAmount = 0;
             _pendingMarketRatio = null;
+
+            _activeWantedCurrency = null;
+            _plannedOfferAmount = 0;
+            _plannedWantAmount = 0;
 
             if (_isAltKeyDown) KeyboardInput.Keyboard.AltKeyUp();
 
@@ -2889,6 +2984,51 @@ namespace SellMyShit
                         0);
                 }
             });
+
+            return true;
+        }
+
+        // The wanted side must be a whole number. Rounding it down on its own undersells the
+        // stack, which costs up to almost one Divine Orb per listing. So round the wanted amount
+        // down, then offer only as many items as that amount pays for at the market ratio, and
+        // keep the rest. Returns false when the whole stack is worth less than 1 of the wanted
+        // currency.
+        private bool TryPlanListing(
+            int ownedAmount,
+            out int offerAmount,
+            out int wantAmount)
+        {
+            offerAmount = 0;
+            wantAmount = 0;
+
+            var ratio = _pendingMarketRatio;
+
+            if (ownedAmount <= 0 ||
+                ratio == null ||
+                ratio.MarketGetRate <= 0 ||
+                ratio.MarketGiveRate <= 0 ||
+                Settings.ListingPricePercent.Value <= 0)
+            {
+                return false;
+            }
+
+            // wanted currency per offered item
+            var rate =
+                ratio.MarketGetRate *
+                (Settings.ListingPricePercent.Value / 100d) /
+                ratio.MarketGiveRate;
+
+            const double epsilon = 1e-9;
+
+            wantAmount = (int)Math.Floor(ownedAmount * rate + epsilon);
+
+            if (wantAmount < 1)
+                return false;
+
+            offerAmount = Math.Clamp(
+                (int)Math.Floor(wantAmount / rate + epsilon),
+                1,
+                ownedAmount);
 
             return true;
         }

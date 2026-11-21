@@ -52,6 +52,8 @@ namespace SellMyShit
                 });
 
 
+            WantedCurrency.SetListValues(WantedCurrencies.All.ToList());
+
             ExcludedCurrenciesEditor = new CustomNode
             {
                 DrawDelegate = DrawExcludedCurrenciesEditor
@@ -164,6 +166,15 @@ namespace SellMyShit
             203,
             PricingGroupId)]
         public ToggleNode OnlyPickRatiosWithSufficientStock { get; set; } = new(true);
+
+        [Menu("Sell for",
+            "Currency to ask for in return. Also switchable from the owned items window.",
+            204,
+            PricingGroupId)]
+        public ListNode WantedCurrency { get; set; } = new()
+        {
+            Value = WantedCurrencies.Chaos
+        };
 
 
         // ─────────────────────────────────────────────
@@ -568,6 +579,14 @@ namespace SellMyShit
                 serialized;
         }
 
+    }
+
+    public static class WantedCurrencies
+    {
+        public const string Chaos = "Chaos Orb";
+        public const string Divine = "Divine Orb";
+
+        public static readonly string[] All = [Chaos, Divine];
     }
 
     public static class SortOptions
