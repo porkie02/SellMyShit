@@ -1,0 +1,14 @@
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Temp\SellMyShit\SellMyShit.deps.json
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Temp\SellMyShit\SellMyShit.runtimeconfig.json
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Temp\SellMyShit\SellMyShit.dll
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Temp\SellMyShit\SellMyShit.pdb
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.csproj.AssemblyReference.cache
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.AssemblyInfoInputs.cache
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.AssemblyInfo.cs
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.csproj.CoreCompileInputs.cache
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.dll
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\refint\SellMyShit.dll
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.pdb
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\SellMyShit.genruntimeconfig.cache
+C:\Users\Dad\Desktop\ExileApi_260724-1.0.0+3876d74815e3d104859444902ff4e4807887d9fc-dirty\Plugins\Source\SellMyShit\obj\Debug\ref\SellMyShit.dll
