@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -135,6 +136,8 @@ namespace SellMyShit
 
             try
             {
+                TrackLoadedStashTabs();
+
                 var currencyExchangePanel = GetCurrencyExchangePanel();
                 if (Settings.Debug)
                 {
@@ -835,6 +838,8 @@ namespace SellMyShit
 
             DrawWantedCurrencyPicker();
 
+            DrawUnloadedStashTabsWarning();
+
             ImGui.Separator();
 
             var childSize = new NumVector2(
@@ -856,6 +861,149 @@ namespace SellMyShit
 
             ImGui.EndChild();
             ImGui.End();
+        }
+
+        // The exchange only counts items in stash tabs the game has loaded since the last zone
+        // change, and special tabs (Delve, Essence, ...) only load when opened. Track which ones
+        // have been opened so the window can say which to click before selling.
+        private static readonly string[] SpecialStashTabTypes =
+            ["Delve", "Essence", "Fragment", "Delirium", "Blight", "Ultimatum", "Divination"];
+
+        private readonly HashSet<string> _loadedStashTabNames =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        private List<string> _watchedStashTabNames = [];
+        private DateTime _watchedStashTabsRefreshUtc = DateTime.MinValue;
+
+        public override void AreaChange(AreaInstance area)
+        {
+            // the game drops loaded tabs on a zone change
+            _loadedStashTabNames.Clear();
+            _watchedStashTabsRefreshUtc = DateTime.MinValue;
+        }
+
+        private void TrackLoadedStashTabs()
+        {
+            try
+            {
+                var stash = GameController?.IngameState?.IngameUi?.StashElement;
+
+                if (stash?.IsVisibleLocal != true)
+                    return;
+
+                var names = stash.AllStashNames;
+                var inventories = stash.AllInventories;
+
+                if (names == null || inventories == null)
+                    return;
+
+                var count = Math.Min(names.Count, inventories.Count);
+
+                for (var i = 0; i < count; i++)
+                {
+                    if (inventories[i] != null && !string.IsNullOrWhiteSpace(names[i]))
+                        _loadedStashTabNames.Add(names[i].Trim());
+                }
+            }
+            catch
+            {
+                // stash memory can be mid-update; try again next frame
+            }
+        }
+
+        private List<string> GetWatchedStashTabNames()
+        {
+            var now = DateTime.UtcNow;
+
+            if (now < _watchedStashTabsRefreshUtc)
+                return _watchedStashTabNames;
+
+            _watchedStashTabsRefreshUtc = now.AddSeconds(10);
+
+            var watched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var extra in (Settings.ExtraStashTabsToCheck?.Value ?? string.Empty)
+                         .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                watched.Add(extra);
+            }
+
+            if (Settings.CheckSpecialStashTabs?.Value != false)
+            {
+                foreach (var (name, type) in ReadStashTabTypes())
+                {
+                    if (SpecialStashTabTypes.Any(special =>
+                            type.Contains(special, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        watched.Add(name);
+                    }
+                }
+            }
+
+            _watchedStashTabNames = watched.OrderBy(name => name).ToList();
+            return _watchedStashTabNames;
+        }
+
+        // ServerData.PlayerStashTabs lists every tab with its type even before the stash is
+        // opened. Read it by reflection, so a different ExileApi build that names these members
+        // differently only loses the automatic list instead of failing to compile.
+        private List<(string Name, string Type)> ReadStashTabTypes()
+        {
+            var result = new List<(string Name, string Type)>();
+
+            try
+            {
+                var serverData = GameController?.IngameState?.ServerData;
+
+                if (serverData?.GetType().GetProperty("PlayerStashTabs")?.GetValue(serverData)
+                    is not IEnumerable tabs)
+                {
+                    return result;
+                }
+
+                foreach (var tab in tabs)
+                {
+                    if (tab == null)
+                        continue;
+
+                    var tabType = tab.GetType();
+                    var name = tabType.GetProperty("Name")?.GetValue(tab) as string;
+                    var type = tabType.GetProperty("TabType")?.GetValue(tab)?.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrEmpty(type))
+                        result.Add((name.Trim(), type));
+                }
+            }
+            catch (Exception ex)
+            {
+                AddDebugMessage($"Could not read stash tab types: {ex.Message}");
+            }
+
+            return result;
+        }
+
+        private List<string> GetUnloadedStashTabs() =>
+            GetWatchedStashTabNames()
+                .Where(name => !_loadedStashTabNames.Contains(name))
+                .ToList();
+
+        private void DrawUnloadedStashTabsWarning()
+        {
+            var unloaded = GetUnloadedStashTabs();
+
+            if (unloaded.Count == 0)
+                return;
+
+            ImGui.TextColored(
+                new System.Numerics.Vector4(1f, 0.65f, 0.2f, 1f),
+                "Not counted until opened this zone: " + string.Join(", ", unloaded));
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    "The exchange only counts items in stash tabs opened since your last zone " +
+                    "change. Open these in your stash, then reopen the exchange.");
+            }
         }
 
         private string GetConfiguredWantedCurrency()
@@ -2579,6 +2727,15 @@ namespace SellMyShit
                 return;
             }
 
+            var unloadedTabs = GetUnloadedStashTabs();
+
+            if (unloadedTabs.Count > 0)
+            {
+                AddDebugMessage(
+                    "Stash tabs not opened this zone, their items are not counted: " +
+                    string.Join(", ", unloadedTabs));
+            }
+
             _activeWantedCurrency = GetConfiguredWantedCurrency();
             _plannedOfferAmount = 0;
             _plannedWantAmount = 0;
@@ -3456,6 +3613,12 @@ namespace SellMyShit
                 ImGui.Text($"Pending wanted item: {_pendingWantedItem?.Text}");
                 ImGui.Text($"Input in progress: {(_inputInProgress != 0)}");
 
+                if (ImGui.Button("Dump picker"))
+                    DumpCurrencyPicker();
+
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Open the \"I have\" list in game first, then click.");
+
                 ImGui.Separator();
 
                 string[] messages;
@@ -3471,6 +3634,83 @@ namespace SellMyShit
             }
             catch (Exception)
             {
+            }
+        }
+
+        // writes everything the plugin can see in the open currency picker to picker_dump.txt in
+        // the plugin folder, to find items (e.g. fossils) that do not make it into Options
+        private void DumpCurrencyPicker()
+        {
+            try
+            {
+                var picker = GetCurrencyExchangePanel()?.CurrencyPicker;
+
+                if (picker?.IsVisible != true)
+                {
+                    LogError("SellMyShit: open the \"I have\" list in game, then click Dump picker.");
+                    return;
+                }
+
+                var sb = new StringBuilder();
+                var options = picker.Options?.ToList() ?? [];
+
+                sb.AppendLine($"Options: {options.Count}");
+
+                foreach (var option in options)
+                {
+                    sb.AppendLine(
+                        $"  '{GetItemName(option)}' owned={option?.Owned} " +
+                        $"visible={option?.IsVisible} addr={option?.Address:X}");
+                }
+
+                sb.AppendLine();
+                sb.AppendLine("Tree ([index path] children visible text):");
+
+                var count = 0;
+                DumpElementTree(picker, string.Empty, 0, sb, ref count);
+
+                var path = System.IO.Path.Combine(DirectoryFullName, "picker_dump.txt");
+                System.IO.File.WriteAllText(path, sb.ToString());
+
+                LogMessage($"SellMyShit: wrote {count} elements to {path}");
+                AddDebugMessage($"Picker dumped to {path}");
+            }
+            catch (Exception ex)
+            {
+                LogError($"SellMyShit: picker dump failed: {ex}");
+            }
+        }
+
+        private static void DumpElementTree(
+            Element element,
+            string indexPath,
+            int depth,
+            StringBuilder sb,
+            ref int count)
+        {
+            if (element == null || depth > 9 || count >= 8000)
+                return;
+
+            count++;
+
+            var children = element.Children;
+            var text = element.Text?.Trim().Replace("\n", " ");
+
+            sb.AppendLine(
+                $"{new string(' ', depth * 2)}[{indexPath}] " +
+                $"{children?.Count ?? 0} {(element.IsVisible ? "V" : "-")} '{text}'");
+
+            if (children == null)
+                return;
+
+            for (var i = 0; i < children.Count; i++)
+            {
+                DumpElementTree(
+                    children[i],
+                    indexPath.Length == 0 ? i.ToString() : $"{indexPath}.{i}",
+                    depth + 1,
+                    sb,
+                    ref count);
             }
         }
 
