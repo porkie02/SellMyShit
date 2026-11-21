@@ -1047,6 +1047,8 @@ namespace SellMyShit
 
             var defaultSortByColum = Settings.SortBy.Value;
 
+            var valueUnit = TryGetDisplayDivisor(out _) ? "div" : "c";
+
 
             var nameTableFlags = ImGuiTableColumnFlags.WidthStretch |
                 ImGuiTableColumnFlags.PreferSortAscending;
@@ -1060,7 +1062,7 @@ namespace SellMyShit
                 ImGuiTableColumnFlags.PreferSortDescending;
             if (defaultSortByColum == SortOptions.Each) eachTableFlags |= ImGuiTableColumnFlags.DefaultSort;
             ImGui.TableSetupColumn(
-                "Each (c)",
+                $"Each ({valueUnit})###each",
                 eachTableFlags,
                 1.6f);
 
@@ -1077,7 +1079,7 @@ namespace SellMyShit
                 ImGuiTableColumnFlags.PreferSortDescending;
             if (defaultSortByColum == "Value") valueTableFlags |= ImGuiTableColumnFlags.DefaultSort;
             ImGui.TableSetupColumn(
-                "Total (c)",
+                $"Total ({valueUnit})###total",
                 valueTableFlags,
                 1.8f);
 
@@ -1189,12 +1191,12 @@ namespace SellMyShit
 
             ImGui.TableNextColumn();
 
+            var inDivines = TryGetDisplayDivisor(out var divisor);
+
             var unitValue = GetUnitNinjaValue(item);
 
             ImGui.TextUnformatted(
-                unitValue.ToString(
-                    unitValue >= 100 ? "0" : "0.##",
-                    CultureInfo.InvariantCulture));
+                FormatValue(unitValue / divisor, inDivines, isTotal: false));
 
             ImGui.TableNextColumn();
 
@@ -1204,12 +1206,11 @@ namespace SellMyShit
 
             ImGui.TableNextColumn();
 
-            var totalValue =
-                GetTotalNinjaValue(item);
+            // the unrounded total, so small stacks still show a fraction of a divine
+            var totalValue = unitValue * item.Owned;
 
             ImGui.TextUnformatted(
-                totalValue.ToString(
-                    CultureInfo.InvariantCulture));
+                FormatValue(totalValue / divisor, inDivines, isTotal: true));
 
             ImGui.TableNextColumn();
 
@@ -3138,6 +3139,14 @@ namespace SellMyShit
             if (!string.IsNullOrEmpty(itemType?.BaseName))
                 return itemType;
 
+            return FindBaseItemTypeByName(GetItemName(option)) ?? itemType;
+        }
+
+        private BaseItemType FindBaseItemTypeByName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return null;
+
             var types =
                 GameController?
                     .Files?
@@ -3145,7 +3154,7 @@ namespace SellMyShit
                     .Contents;
 
             if (types == null || types.Count == 0)
-                return itemType;
+                return null;
 
             if (_baseItemTypesByName == null ||
                 _baseItemTypesSourceCount != types.Count)
@@ -3172,8 +3181,68 @@ namespace SellMyShit
                 _baseItemTypesSourceCount = types.Count;
             }
 
-            return _baseItemTypesByName.GetValueOrDefault(GetItemName(option))
-                   ?? itemType;
+            return _baseItemTypesByName.GetValueOrDefault(name);
+        }
+
+        private double _divinePriceInChaos;
+        private DateTime _divinePriceRefreshUtc = DateTime.MinValue;
+
+        // poe.ninja's chaos price of one Divine Orb, refreshed every few seconds; 0 if unknown
+        private double GetDivinePriceInChaos()
+        {
+            var now = DateTime.UtcNow;
+
+            if (now < _divinePriceRefreshUtc)
+                return _divinePriceInChaos;
+
+            _divinePriceRefreshUtc = now.AddSeconds(5);
+
+            var divine = new OwnedCurrency
+            {
+                Name = WantedCurrencies.Divine,
+                Owned = 1,
+                ItemType = FindBaseItemTypeByName(WantedCurrencies.Divine)
+            };
+
+            _divinePriceInChaos =
+                TryGetNinjaValue(divine, out var price) && price > 0
+                    ? price
+                    : 0;
+
+            return _divinePriceInChaos;
+        }
+
+        // values are shown in divines while selling for divines, if the divine price is known
+        private bool TryGetDisplayDivisor(out double divisor)
+        {
+            divisor = 1;
+
+            if (GetConfiguredWantedCurrency() != WantedCurrencies.Divine)
+                return false;
+
+            var divinePrice = GetDivinePriceInChaos();
+
+            if (divinePrice <= 0)
+                return false;
+
+            divisor = divinePrice;
+            return true;
+        }
+
+        private static string FormatValue(double value, bool inDivines, bool isTotal)
+        {
+            if (!inDivines)
+            {
+                return isTotal
+                    ? Math.Floor(value).ToString(CultureInfo.InvariantCulture)
+                    : value.ToString(value >= 100 ? "0" : "0.##", CultureInfo.InvariantCulture);
+            }
+
+            var format = value >= 100 ? "0"
+                : value >= 1 || isTotal ? "0.##"
+                : "0.####";
+
+            return value.ToString(format, CultureInfo.InvariantCulture);
         }
 
         private double GetUnitNinjaValue(OwnedCurrency item) =>
