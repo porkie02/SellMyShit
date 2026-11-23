@@ -278,7 +278,7 @@ namespace SellMyShit
                     seen[name] = new OwnedCurrency
                     {
                         Name = name,
-                        Owned = option.Owned,
+                        Owned = GetOwnedAmount(option),
                         ItemType = ResolveBaseItemType(option)
                     };
                 }
@@ -2767,6 +2767,61 @@ namespace SellMyShit
         private static string GetItemName(OwnedCurrency item) =>
             item?.Name ?? "Unknown";
 
+        // The exchange shows big stacks abbreviated ("37.7K" lifeforce), and ExileCore's Owned
+        // parses that label as 0, which hid those rows. Read the label ourselves and take the
+        // smallest count it can stand for, so a listing never offers more than the stack holds.
+        private static int GetOwnedAmount(
+            CurrencyExchangeCurrencyPickerCurrencyOption option)
+        {
+            var owned = option?.Owned ?? 0;
+
+            if (owned > 0)
+                return owned;
+
+            return ParseAbbreviatedCount(
+                option?.GetChildAtIndex(1)?.GetChildAtIndex(0)?.Text);
+        }
+
+        internal static int ParseAbbreviatedCount(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return 0;
+
+            text = text.Trim().Replace(",", string.Empty);
+
+            var multiplier = char.ToUpperInvariant(text[^1]) switch
+            {
+                'K' => 1e3,
+                'M' => 1e6,
+                'B' => 1e9,
+                _ => 1d
+            };
+
+            if (multiplier > 1)
+                text = text[..^1];
+
+            if (!double.TryParse(
+                    text,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var value) ||
+                value <= 0)
+            {
+                return 0;
+            }
+
+            if (multiplier == 1)
+                return (int)Math.Min(value, int.MaxValue);
+
+            // "37.7K" is 37,650..37,799 depending on whether the game rounds or truncates
+            var dot = text.IndexOf('.');
+            var decimals = dot < 0 ? 0 : text.Length - dot - 1;
+            var halfStep = 0.5 * Math.Pow(10, -decimals);
+            var lower = Math.Ceiling(Math.Round((value - halfStep) * multiplier, 6));
+
+            return (int)Math.Clamp(lower, 1, int.MaxValue);
+        }
+
         private static string GetItemSearchText(OwnedCurrency item) =>
             item?.Name ?? string.Empty;
 
@@ -2995,7 +3050,7 @@ namespace SellMyShit
                            listRect.Value.Width <= 0 ||
                            listRect.Value.Contains(rect.Center);
                 })
-                .OrderByDescending(option => option.Owned)
+                .OrderByDescending(GetOwnedAmount)
                 .FirstOrDefault();
         }
 
@@ -3659,7 +3714,7 @@ namespace SellMyShit
                 foreach (var option in options)
                 {
                     sb.AppendLine(
-                        $"  '{GetItemName(option)}' owned={option?.Owned} " +
+                        $"  '{GetItemName(option)}' owned={GetOwnedAmount(option)} " +
                         $"visible={option?.IsVisible} addr={option?.Address:X}");
                 }
 
